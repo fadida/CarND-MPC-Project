@@ -11,11 +11,15 @@
 
 // for convenience
 using json = nlohmann::json;
+using namespace std;
 
 // For converting back and forth between radians and degrees.
 constexpr double pi() { return M_PI; }
 double deg2rad(double x) { return x * pi() / 180; }
 double rad2deg(double x) { return x * 180 / pi(); }
+
+constexpr double NEXT_VAL_POLY_DELTA = 2.5;
+constexpr double NEXT_VAL_LENGTH     = 25;
 
 // Checks if the SocketIO event has JSON data.
 // If there is data the JSON object in string format will be returned,
@@ -92,14 +96,46 @@ int main() {
           double psi = j[1]["psi"];
           double v = j[1]["speed"];
 
+          for (size_t i = 0; i < ptsx.size(); ++i) {
+            double offset_x = ptsx[i] - px;
+            double offset_y = ptsx[i] - py;
+
+            ptsx[i] = offset_x * cos(0 - psi) - offset_y * sin(0 - psi);
+            ptsy[i] = offset_x * sin(0 - psi) + offset_y * cos(0 - psi);
+          }
+
+          Eigen::VectorXd waypoints_x = Eigen::VectorXd::Map(&(ptsx[0]), ptsx.size());
+          Eigen::VectorXd waypoints_y = Eigen::VectorXd::Map(&(ptsy[0]), ptsy.size());
+
+#if 0
+          // Normalize x & y
+          Eigen::VectorXd i_vec             = Eigen::VectorXd(ptsx.size());
+          Eigen::VectorXd waypoint_offset_x = waypoints_x - px * i_vec;
+          Eigen::VectorXd waypoint_offset_y = waypoints_y - py * i_vec;
+
+          //TODO: Cache cos & sin
+          waypoints_x = (waypoint_offset_x * cos(-psi)) - (waypoint_offset_y * sin(-psi));
+          waypoints_y = (waypoint_offset_x * sin(-psi)) + (waypoint_offset_y * cos(-psi));
+#endif
           /*
           * TODO: Calculate steering angle and throttle using MPC.
           *
           * Both are in between [-1, 1].
           *
           */
-          double steer_value;
-          double throttle_value;
+          Eigen::VectorXd coeffs = polyfit(waypoints_x, waypoints_y, 3);
+
+          double cte  = polyeval(coeffs, 0);
+          double epsi = -atan(coeffs[1]);
+          Eigen::VectorXd state(6);
+          state << 0, 0, 0, v, cte, epsi;
+
+          vector<double> vars = mpc.Solve(state, coeffs);
+
+          const double Lf = 2.67;
+
+          double steer_value    = vars[0] / (deg2rad(25) * Lf);
+          double throttle_value = vars[1];
 
           json msgJson;
           // NOTE: Remember to divide by deg2rad(25) before you send the steering value back.
@@ -111,6 +147,11 @@ int main() {
           vector<double> mpc_x_vals;
           vector<double> mpc_y_vals;
 
+          for (size_t var_idx = 2; var_idx < vars.size(); var_idx += 2) {
+            mpc_x_vals.push_back(vars[var_idx]);
+            mpc_y_vals.push_back(vars[var_idx + 1]);
+          }
+
           //.. add (x,y) points to list here, points are in reference to the vehicle's coordinate system
           // the points in the simulator are connected by a Green line
 
@@ -118,8 +159,13 @@ int main() {
           msgJson["mpc_y"] = mpc_y_vals;
 
           //Display the waypoints/reference line
-          vector<double> next_x_vals;
-          vector<double> next_y_vals;
+          vector<double> next_x_vals(NEXT_VAL_LENGTH);
+          vector<double> next_y_vals(NEXT_VAL_LENGTH);
+
+          for (int point = 0; point < NEXT_VAL_LENGTH; ++point) {
+            next_x_vals[point] = NEXT_VAL_POLY_DELTA * point;
+            next_y_vals[point] = polyeval(coeffs, next_x_vals[point]);
+          }
 
           //.. add (x,y) points to list here, points are in reference to the vehicle's coordinate system
           // the points in the simulator are connected by a Yellow line
@@ -139,7 +185,7 @@ int main() {
           //
           // NOTE: REMEMBER TO SET THIS TO 100 MILLISECONDS BEFORE
           // SUBMITTING.
-          this_thread::sleep_for(chrono::milliseconds(100));
+          //this_thread::sleep_for(chrono::milliseconds(100));
           ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
         }
       } else {

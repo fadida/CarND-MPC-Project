@@ -5,9 +5,15 @@
 
 using CppAD::AD;
 
+using namespace std;
+
+double mpc_deg2rad(double deg) {
+  return deg / 180 * M_PI;
+}
+
 // TODO: Set the timestep length and duration
-size_t N = 0;
-double dt = 0;
+const size_t N  = 10;
+const double dt = 0.1;
 
 // This value assumes the model presented in the classroom is used.
 //
@@ -21,18 +27,147 @@ double dt = 0;
 // This is the length from front to CoG that has a similar radius.
 const double Lf = 2.67;
 
+const double REF_VELOCITY = 100;
+
+const double COST_FACTOR_ERRORS = 2000;
+const double COST_FACTOR_VELOCITY = 1;
+const double COST_FACTOR_ACTUATORS = 5;
+const double COST_FACTOR_DELTA_CONT = 200;
+const double COST_FACTOR_A_CONT = 200;
+
+// The start index for each variable in `vars` vector.
+const size_t VAR_VEC_X_START_IDX     = 0;
+const size_t VAR_VEC_Y_START_IDX     = VAR_VEC_X_START_IDX + N;
+const size_t VAR_VEC_PSI_START_IDX   = VAR_VEC_Y_START_IDX + N;
+const size_t VAR_VEC_V_START_IDX     = VAR_VEC_PSI_START_IDX + N;
+const size_t VAR_VEC_CTE_START_IDX   = VAR_VEC_V_START_IDX + N;
+const size_t VAR_VEC_EPSI_START_IDX  = VAR_VEC_CTE_START_IDX + N;
+const size_t VAR_VEC_DELTA_START_IDX = VAR_VEC_EPSI_START_IDX + N;
+const size_t VAR_VEC_A_START_IDX     = VAR_VEC_A_START_IDX + N - 1;
+
+// The index of each variable in `state` vector.
+const int STATE_VEC_X_IDX     = 0;
+const int STATE_VEC_Y_IDX     = 1;
+const int STATE_VEC_PSI_IDX   = 2;
+const int STATE_VEC_V_IDX     = 3;
+const int STATE_VEC_CTE_IDX   = 4;
+const int STATE_VEC_EPSI_IDX  = 5;
+
+// The controlled parameters constraints
+const double DELTA_MAX = mpc_deg2rad(25);
+const double DELTA_MIN = mpc_deg2rad(-25);
+const double A_MAX     = 1;
+const double A_MIN     = 1;
+
 class FG_eval {
  public:
   // Fitted polynomial coefficients
   Eigen::VectorXd coeffs;
-  FG_eval(Eigen::VectorXd coeffs) { this->coeffs = coeffs; }
+
+  FG_eval(Eigen::VectorXd coeffs) :
+  coeffs(coeffs)
+  {}
 
   typedef CPPAD_TESTVECTOR(AD<double>) ADvector;
   void operator()(ADvector& fg, const ADvector& vars) {
-    // TODO: implement MPC
+    // Implement MPC
     // `fg` a vector of the cost constraints, `vars` is a vector of variable values (state & actuators)
     // NOTE: You'll probably go back and forth between this function and
-    // the Solver function below.
+    // the Solver function below
+
+    // Calculate the cost function
+    AD<double>& cost = fg[0];
+
+    cost = 0;
+
+    // Add errors to cost function in order to minimize the errors
+    for (size_t error_idx = VAR_VEC_CTE_START_IDX; error_idx < VAR_VEC_DELTA_START_IDX; ++error_idx ) {
+      AD<double> err = vars[error_idx];
+
+      cost += COST_FACTOR_ERRORS * err * err;
+    }
+
+    // Add velocity to cost function in order to make the velocity closer to the reference velocity.
+    for (size_t vel_idx = VAR_VEC_V_START_IDX; vel_idx < VAR_VEC_CTE_START_IDX; ++vel_idx) {
+      AD<double> delta_v = vars[vel_idx] - REF_VELOCITY;
+
+      cost += COST_FACTOR_VELOCITY * delta_v * delta_v;
+    }
+
+    // Add actuators to cost in order to minimize their use.
+    for (size_t actuator_idx = VAR_VEC_DELTA_START_IDX; actuator_idx < vars.size(); ++actuator_idx) {
+      AD<double> actuator = vars[actuator_idx];
+
+      cost += COST_FACTOR_ACTUATORS * actuator * actuator;
+    }
+
+    // Add actuator deltas in order to prevents jump in actuator values.
+    for (size_t delta_idx = VAR_VEC_DELTA_START_IDX; delta_idx < VAR_VEC_A_START_IDX - 1; ++delta_idx) {
+      AD<double> actuator_delta = vars[delta_idx + 1] - vars[delta_idx];
+
+      cost += COST_FACTOR_DELTA_CONT * actuator_delta * actuator_delta;
+    }
+    
+    for (size_t a_idx = VAR_VEC_A_START_IDX; a_idx < vars.size() - 1; ++a_idx) {
+      AD<double> actuator_delta = vars[a_idx + 1] - vars[a_idx];
+
+      cost += COST_FACTOR_A_CONT * actuator_delta * actuator_delta;
+    }
+
+    // Calculate constraints
+    size_t constraint_start_idx = 1; // equals one because idx 0 is used for cost
+
+    // constraints at time slot 0
+    fg[constraint_start_idx + VAR_VEC_X_START_IDX]    = vars[VAR_VEC_X_START_IDX];
+    fg[constraint_start_idx + VAR_VEC_Y_START_IDX]    = vars[VAR_VEC_Y_START_IDX];
+    fg[constraint_start_idx + VAR_VEC_PSI_START_IDX]  = vars[VAR_VEC_PSI_START_IDX];
+    fg[constraint_start_idx + VAR_VEC_V_START_IDX]    = vars[VAR_VEC_V_START_IDX];
+    fg[constraint_start_idx + VAR_VEC_CTE_START_IDX]  = vars[VAR_VEC_CTE_START_IDX];
+    fg[constraint_start_idx + VAR_VEC_EPSI_START_IDX] = vars[VAR_VEC_EPSI_START_IDX];
+
+    for (size_t time_slot_idx = 1; time_slot_idx < N; ++time_slot_idx) {
+      // Get future state (at t+1)
+      AD<double> next_x    = vars[VAR_VEC_X_START_IDX + time_slot_idx];
+      AD<double> next_y    = vars[VAR_VEC_Y_START_IDX + time_slot_idx];
+      AD<double> next_psi  = vars[VAR_VEC_PSI_START_IDX + time_slot_idx];
+      AD<double> next_v    = vars[VAR_VEC_V_START_IDX + time_slot_idx];
+      AD<double> next_cte  = vars[VAR_VEC_CTE_START_IDX + time_slot_idx];
+      AD<double> next_epsi = vars[VAR_VEC_EPSI_START_IDX + time_slot_idx];
+
+      // Get curr state
+      AD<double> curr_x    = vars[VAR_VEC_X_START_IDX + time_slot_idx - 1];
+      AD<double> curr_y    = vars[VAR_VEC_Y_START_IDX + time_slot_idx - 1];
+      AD<double> curr_psi  = vars[VAR_VEC_PSI_START_IDX + time_slot_idx - 1];
+      AD<double> curr_v    = vars[VAR_VEC_V_START_IDX + time_slot_idx - 1];
+      AD<double> curr_cte  = vars[VAR_VEC_CTE_START_IDX + time_slot_idx - 1];
+      AD<double> curr_epsi = vars[VAR_VEC_EPSI_START_IDX + time_slot_idx - 1];
+
+      // Get curr actuator values
+      AD<double> curr_delta = vars[VAR_VEC_DELTA_START_IDX + time_slot_idx - 1];
+      AD<double> curr_a     = vars[VAR_VEC_A_START_IDX + time_slot_idx - 1];
+
+      AD<double> curr_x_2   = curr_x * curr_x;
+      AD<double> curr_x_3   = curr_x_2 * curr_x;
+
+      AD<double> curr_f       = coeffs[0] + coeffs[1] * curr_x + coeffs[2] * curr_x_2 + coeffs[3] * curr_x_3;
+      AD<double> curr_psi_des = CppAD::atan(coeffs[1] + 2 * coeffs[2] * curr_x + 3 * coeffs[3] * curr_x_2);
+
+      // Predict future state using the model.
+      AD<double> pred_x    = curr_x + curr_v * CppAD::cos(curr_psi) * dt;
+      AD<double> pred_y    = curr_y + curr_v * CppAD::sin(curr_psi) * dt;
+      AD<double> pred_psi  = curr_psi - curr_v * curr_delta * dt / Lf;
+      AD<double> pred_v    = curr_v + curr_a * dt;
+      AD<double> pred_cte  = curr_f - curr_y + curr_v * CppAD::sin(curr_epsi) * dt;
+      AD<double> pred_epsi = pred_psi - curr_psi_des;
+
+      // Set the future state constrains
+      fg[constraint_start_idx + VAR_VEC_X_START_IDX + time_slot_idx]    = next_x - pred_x;
+      fg[constraint_start_idx + VAR_VEC_Y_START_IDX + time_slot_idx]    = next_y - pred_y;
+      fg[constraint_start_idx + VAR_VEC_PSI_START_IDX + time_slot_idx]  = next_psi - pred_psi;
+      fg[constraint_start_idx + VAR_VEC_V_START_IDX + time_slot_idx]    = next_v - pred_v;
+      fg[constraint_start_idx + VAR_VEC_CTE_START_IDX + time_slot_idx]  = next_cte - pred_cte;
+      fg[constraint_start_idx + VAR_VEC_EPSI_START_IDX + time_slot_idx] = next_epsi - pred_epsi;
+    }
   }
 };
 
@@ -44,37 +179,91 @@ MPC::~MPC() {}
 
 vector<double> MPC::Solve(Eigen::VectorXd state, Eigen::VectorXd coeffs) {
   bool ok = true;
-  size_t i;
+  size_t var_idx;
   typedef CPPAD_TESTVECTOR(double) Dvector;
 
-  // TODO: Set the number of model variables (includes both states and inputs).
+  double curr_x    = state[STATE_VEC_X_IDX];
+  double curr_y    = state[STATE_VEC_Y_IDX];
+  double curr_psi  = state[STATE_VEC_PSI_IDX];
+  double curr_v    = state[STATE_VEC_V_IDX];
+  double curr_cte  = state[STATE_VEC_CTE_IDX];
+  double curr_epsi = state[STATE_VEC_EPSI_IDX];
+
+  // Set the number of model variables (includes both states and inputs).
   // For example: If the state is a 4 element vector, the actuators is a 2
   // element vector and there are 10 timesteps. The number of variables is:
   //
   // 4 * 10 + 2 * 9
-  size_t n_vars = 0;
-  // TODO: Set the number of constraints
-  size_t n_constraints = 0;
+  size_t n_vars   = N * state.size() + (N - 1) * 2;
+
+  //Set the number of constraints
+  size_t n_constraints = N * state.size();
 
   // Initial value of the independent variables.
   // SHOULD BE 0 besides initial state.
   Dvector vars(n_vars);
-  for (int i = 0; i < n_vars; i++) {
-    vars[i] = 0;
+  for (var_idx = 0; var_idx < n_vars; ++var_idx) {
+    vars[var_idx] = 0;
   }
+
+  // Set initial variable values
+  vars[VAR_VEC_X_START_IDX]    = curr_x;
+  vars[VAR_VEC_Y_START_IDX]    = curr_y;
+  vars[VAR_VEC_PSI_START_IDX]  = curr_psi;
+  vars[VAR_VEC_V_START_IDX]    = curr_v;
+  vars[VAR_VEC_CTE_START_IDX]  = curr_cte;
+  vars[VAR_VEC_EPSI_START_IDX] = curr_epsi;
 
   Dvector vars_lowerbound(n_vars);
   Dvector vars_upperbound(n_vars);
-  // TODO: Set lower and upper limits for variables.
+
+  // Set lower and upper limits for state variables.
+  double max_value = 1.0e19;
+  double min_value = -1.0e19;
+  for (var_idx = 0; var_idx < N * state.size(); ++var_idx) {
+    vars_lowerbound[var_idx] = min_value;
+    vars_upperbound[var_idx] = max_value;
+  }
+
+  // Set lower and upper limits for state variables.
+  max_value = DELTA_MAX;
+  min_value = DELTA_MIN;
+  for (; var_idx < n_vars - (N - 1); ++var_idx) {
+    vars_lowerbound[var_idx] = min_value;
+    vars_upperbound[var_idx] = max_value;
+  }
+
+  // Set lower and upper limits for state variables.
+  max_value = A_MAX;
+  min_value = A_MIN;
+  for (; var_idx < n_vars; ++var_idx) {
+    vars_lowerbound[var_idx] = min_value;
+    vars_upperbound[var_idx] = max_value;
+  }
 
   // Lower and upper limits for the constraints
   // Should be 0 besides initial state.
   Dvector constraints_lowerbound(n_constraints);
   Dvector constraints_upperbound(n_constraints);
-  for (int i = 0; i < n_constraints; i++) {
-    constraints_lowerbound[i] = 0;
-    constraints_upperbound[i] = 0;
+  for (var_idx = 0; var_idx < n_constraints; var_idx++) {
+    constraints_lowerbound[var_idx] = 0;
+    constraints_upperbound[var_idx] = 0;
   }
+
+  constraints_lowerbound[VAR_VEC_X_START_IDX]    = curr_x;
+  constraints_lowerbound[VAR_VEC_Y_START_IDX]    = curr_y;
+  constraints_lowerbound[VAR_VEC_PSI_START_IDX]  = curr_psi;
+  constraints_lowerbound[VAR_VEC_V_START_IDX]    = curr_v;
+  constraints_lowerbound[VAR_VEC_CTE_START_IDX]  = curr_cte;
+  constraints_lowerbound[VAR_VEC_EPSI_START_IDX] = curr_epsi;
+
+  constraints_upperbound[VAR_VEC_X_START_IDX]    = curr_x;
+  constraints_upperbound[VAR_VEC_Y_START_IDX]    = curr_y;
+  constraints_upperbound[VAR_VEC_PSI_START_IDX]  = curr_psi;
+  constraints_upperbound[VAR_VEC_V_START_IDX]    = curr_v;
+  constraints_upperbound[VAR_VEC_CTE_START_IDX]  = curr_cte;
+  constraints_upperbound[VAR_VEC_EPSI_START_IDX] = curr_epsi;
+
 
   // object that computes objective and constraints
   FG_eval fg_eval(coeffs);
@@ -117,5 +306,15 @@ vector<double> MPC::Solve(Eigen::VectorXd state, Eigen::VectorXd coeffs) {
   //
   // {...} is shorthand for creating a vector, so auto x1 = {1.0,2.0}
   // creates a 2 element double vector.
-  return {};
+
+  vector<double> result;
+  result.push_back(solution.x[VAR_VEC_DELTA_START_IDX]);
+  result.push_back(solution.x[VAR_VEC_A_START_IDX]);
+
+  for (var_idx = VAR_VEC_X_START_IDX + 1; var_idx < VAR_VEC_Y_START_IDX - 1; ++var_idx) {
+    result.push_back(solution.x[var_idx]);
+    result.push_back(solution.x[var_idx + N]);
+  }
+
+  return result;
 }
