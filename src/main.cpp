@@ -96,41 +96,36 @@ int main() {
           double psi = j[1]["psi"];
           double v = j[1]["speed"];
 
+          double cos_delta = cos(0 - psi);
+          double sin_delta = sin(0 - psi);
           for (size_t i = 0; i < ptsx.size(); ++i) {
             double offset_x = ptsx[i] - px;
-            double offset_y = ptsx[i] - py;
+            double offset_y = ptsy[i] - py;
 
-            ptsx[i] = offset_x * cos(0 - psi) - offset_y * sin(0 - psi);
-            ptsy[i] = offset_x * sin(0 - psi) + offset_y * cos(0 - psi);
+            ptsx[i] = (offset_x * cos_delta - offset_y * sin_delta);
+            ptsy[i] = (offset_x * sin_delta + offset_y * cos_delta);
           }
 
-          Eigen::VectorXd waypoints_x = Eigen::VectorXd::Map(&(ptsx[0]), ptsx.size());
-          Eigen::VectorXd waypoints_y = Eigen::VectorXd::Map(&(ptsy[0]), ptsy.size());
+          double* ptrx = &ptsx[0];
+          double* ptry = &ptsy[0];
 
-#if 0
-          // Normalize x & y
-          Eigen::VectorXd i_vec             = Eigen::VectorXd(ptsx.size());
-          Eigen::VectorXd waypoint_offset_x = waypoints_x - px * i_vec;
-          Eigen::VectorXd waypoint_offset_y = waypoints_y - py * i_vec;
+          Eigen::Map<Eigen::VectorXd> ptsx_transform(ptrx, ptsx.size());
+          Eigen::Map<Eigen::VectorXd> ptsy_transform(ptry, ptsy.size());
 
-          //TODO: Cache cos & sin
-          waypoints_x = (waypoint_offset_x * cos(-psi)) - (waypoint_offset_y * sin(-psi));
-          waypoints_y = (waypoint_offset_x * sin(-psi)) + (waypoint_offset_y * cos(-psi));
-#endif
           /*
           * TODO: Calculate steering angle and throttle using MPC.
           *
           * Both are in between [-1, 1].
           *
           */
-          Eigen::VectorXd coeffs = polyfit(waypoints_x, waypoints_y, 3);
+          auto coeffs = polyfit(ptsx_transform, ptsy_transform, 3);
 
           double cte  = polyeval(coeffs, 0);
           double epsi = -atan(coeffs[1]);
           Eigen::VectorXd state(6);
           state << 0, 0, 0, v, cte, epsi;
 
-          vector<double> vars = mpc.Solve(state, coeffs);
+          auto vars = mpc.Solve(state, coeffs);
 
           const double Lf = 2.67;
 
@@ -140,6 +135,9 @@ int main() {
           json msgJson;
           // NOTE: Remember to divide by deg2rad(25) before you send the steering value back.
           // Otherwise the values will be in between [-deg2rad(25), deg2rad(25] instead of [-1, 1].
+          //msgJson["steering_angle"] = 0.0;
+          //msgJson["throttle"] = 0.0;
+
           msgJson["steering_angle"] = steer_value;
           msgJson["throttle"] = throttle_value;
 
@@ -151,7 +149,6 @@ int main() {
             mpc_x_vals.push_back(vars[var_idx]);
             mpc_y_vals.push_back(vars[var_idx + 1]);
           }
-
           //.. add (x,y) points to list here, points are in reference to the vehicle's coordinate system
           // the points in the simulator are connected by a Green line
 
@@ -159,14 +156,13 @@ int main() {
           msgJson["mpc_y"] = mpc_y_vals;
 
           //Display the waypoints/reference line
-          vector<double> next_x_vals(NEXT_VAL_LENGTH);
-          vector<double> next_y_vals(NEXT_VAL_LENGTH);
+          vector<double> next_x_vals;
+          vector<double> next_y_vals;
 
-          for (int point = 0; point < NEXT_VAL_LENGTH; ++point) {
-            next_x_vals[point] = NEXT_VAL_POLY_DELTA * point;
-            next_y_vals[point] = polyeval(coeffs, next_x_vals[point]);
+          for (int point = 1; point < NEXT_VAL_LENGTH; ++point) {
+            next_x_vals.push_back(NEXT_VAL_POLY_DELTA * point);
+            next_y_vals.push_back(polyeval(coeffs, NEXT_VAL_POLY_DELTA * point));
           }
-
           //.. add (x,y) points to list here, points are in reference to the vehicle's coordinate system
           // the points in the simulator are connected by a Yellow line
 
@@ -185,7 +181,7 @@ int main() {
           //
           // NOTE: REMEMBER TO SET THIS TO 100 MILLISECONDS BEFORE
           // SUBMITTING.
-          //this_thread::sleep_for(chrono::milliseconds(100));
+          this_thread::sleep_for(chrono::milliseconds(100));
           ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
         }
       } else {

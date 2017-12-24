@@ -8,7 +8,7 @@ using CppAD::AD;
 using namespace std;
 
 double mpc_deg2rad(double deg) {
-  return deg / 180 * M_PI;
+  return deg * M_PI / 180;
 }
 
 // TODO: Set the timestep length and duration
@@ -27,13 +27,16 @@ const double dt = 0.1;
 // This is the length from front to CoG that has a similar radius.
 const double Lf = 2.67;
 
-const double REF_VELOCITY = 100;
+const double REF_VELOCITY = 40;
+const double REF_CTE      = 0;
+const double REF_EPSI     = 0;
 
-const double COST_FACTOR_ERRORS = 2000;
+const double COST_FACTOR_ERRORS = 1000;
 const double COST_FACTOR_VELOCITY = 1;
-const double COST_FACTOR_ACTUATORS = 5;
-const double COST_FACTOR_DELTA_CONT = 200;
-const double COST_FACTOR_A_CONT = 200;
+const double COST_FACTOR_DELTA = 2000;
+const double COST_FACTOR_A     = 400;
+const double COST_FACTOR_DELTA_CONT = 600;
+const double COST_FACTOR_A_CONT = 10;
 
 // The start index for each variable in `vars` vector.
 const size_t VAR_VEC_X_START_IDX     = 0;
@@ -43,7 +46,7 @@ const size_t VAR_VEC_V_START_IDX     = VAR_VEC_PSI_START_IDX + N;
 const size_t VAR_VEC_CTE_START_IDX   = VAR_VEC_V_START_IDX + N;
 const size_t VAR_VEC_EPSI_START_IDX  = VAR_VEC_CTE_START_IDX + N;
 const size_t VAR_VEC_DELTA_START_IDX = VAR_VEC_EPSI_START_IDX + N;
-const size_t VAR_VEC_A_START_IDX     = VAR_VEC_A_START_IDX + N - 1;
+const size_t VAR_VEC_A_START_IDX     = VAR_VEC_DELTA_START_IDX + N - 1;
 
 // The index of each variable in `state` vector.
 const int STATE_VEC_X_IDX     = 0;
@@ -54,10 +57,10 @@ const int STATE_VEC_CTE_IDX   = 4;
 const int STATE_VEC_EPSI_IDX  = 5;
 
 // The controlled parameters constraints
-const double DELTA_MAX = mpc_deg2rad(25);
-const double DELTA_MIN = mpc_deg2rad(-25);
+const double DELTA_MAX = mpc_deg2rad(25) * Lf;
+const double DELTA_MIN = mpc_deg2rad(-25) * Lf;
 const double A_MAX     = 1;
-const double A_MIN     = 1;
+const double A_MIN     = -1;
 
 class FG_eval {
  public:
@@ -76,43 +79,27 @@ class FG_eval {
     // the Solver function below
 
     // Calculate the cost function
-    AD<double>& cost = fg[0];
-
-    cost = 0;
-
+    fg[0] = 0;
     // Add errors to cost function in order to minimize the errors
-    for (size_t error_idx = VAR_VEC_CTE_START_IDX; error_idx < VAR_VEC_DELTA_START_IDX; ++error_idx ) {
-      AD<double> err = vars[error_idx];
+    for (size_t time_slot_idx = 0; time_slot_idx < N; ++time_slot_idx ) {
+      fg[0] += COST_FACTOR_ERRORS * CppAD::pow(vars[VAR_VEC_CTE_START_IDX + time_slot_idx] - REF_CTE, 2);
+      fg[0] += COST_FACTOR_ERRORS * CppAD::pow(vars[VAR_VEC_EPSI_START_IDX + time_slot_idx] - REF_EPSI, 2);
 
-      cost += COST_FACTOR_ERRORS * err * err;
-    }
-
-    // Add velocity to cost function in order to make the velocity closer to the reference velocity.
-    for (size_t vel_idx = VAR_VEC_V_START_IDX; vel_idx < VAR_VEC_CTE_START_IDX; ++vel_idx) {
-      AD<double> delta_v = vars[vel_idx] - REF_VELOCITY;
-
-      cost += COST_FACTOR_VELOCITY * delta_v * delta_v;
+      fg[0] += COST_FACTOR_VELOCITY * CppAD::pow(vars[VAR_VEC_V_START_IDX + time_slot_idx] - REF_VELOCITY, 2);
     }
 
     // Add actuators to cost in order to minimize their use.
-    for (size_t actuator_idx = VAR_VEC_DELTA_START_IDX; actuator_idx < vars.size(); ++actuator_idx) {
-      AD<double> actuator = vars[actuator_idx];
-
-      cost += COST_FACTOR_ACTUATORS * actuator * actuator;
+    for (size_t time_slot_idx = 0; time_slot_idx < N - 1; ++time_slot_idx ) {
+      fg[0] += COST_FACTOR_DELTA * CppAD::pow(vars[VAR_VEC_DELTA_START_IDX + time_slot_idx], 2);
+      fg[0] += COST_FACTOR_A * CppAD::pow(vars[VAR_VEC_A_START_IDX + time_slot_idx], 2);
     }
 
     // Add actuator deltas in order to prevents jump in actuator values.
-    for (size_t delta_idx = VAR_VEC_DELTA_START_IDX; delta_idx < VAR_VEC_A_START_IDX - 1; ++delta_idx) {
-      AD<double> actuator_delta = vars[delta_idx + 1] - vars[delta_idx];
-
-      cost += COST_FACTOR_DELTA_CONT * actuator_delta * actuator_delta;
+    for (size_t time_slot_idx = 0; time_slot_idx < N - 2; ++time_slot_idx ) {
+      fg[0] += COST_FACTOR_DELTA_CONT * CppAD::pow(vars[VAR_VEC_DELTA_START_IDX + time_slot_idx + 1] - vars[VAR_VEC_DELTA_START_IDX + time_slot_idx], 2);
+      fg[0] += COST_FACTOR_A_CONT * CppAD::pow(vars[VAR_VEC_A_START_IDX + time_slot_idx + 1] - vars[VAR_VEC_A_START_IDX + time_slot_idx], 2);
     }
     
-    for (size_t a_idx = VAR_VEC_A_START_IDX; a_idx < vars.size() - 1; ++a_idx) {
-      AD<double> actuator_delta = vars[a_idx + 1] - vars[a_idx];
-
-      cost += COST_FACTOR_A_CONT * actuator_delta * actuator_delta;
-    }
 
     // Calculate constraints
     size_t constraint_start_idx = 1; // equals one because idx 0 is used for cost
@@ -155,10 +142,10 @@ class FG_eval {
       // Predict future state using the model.
       AD<double> pred_x    = curr_x + curr_v * CppAD::cos(curr_psi) * dt;
       AD<double> pred_y    = curr_y + curr_v * CppAD::sin(curr_psi) * dt;
-      AD<double> pred_psi  = curr_psi - curr_v * curr_delta * dt / Lf;
+      AD<double> pred_psi  = curr_psi - curr_v * curr_delta / Lf * dt;
       AD<double> pred_v    = curr_v + curr_a * dt;
       AD<double> pred_cte  = curr_f - curr_y + curr_v * CppAD::sin(curr_epsi) * dt;
-      AD<double> pred_epsi = pred_psi - curr_psi_des;
+      AD<double> pred_epsi = curr_psi - curr_psi_des - curr_v * curr_delta / Lf * dt;
 
       // Set the future state constrains
       fg[constraint_start_idx + VAR_VEC_X_START_IDX + time_slot_idx]    = next_x - pred_x;
@@ -206,6 +193,8 @@ vector<double> MPC::Solve(Eigen::VectorXd state, Eigen::VectorXd coeffs) {
     vars[var_idx] = 0;
   }
 
+  #if 0
+
   // Set initial variable values
   vars[VAR_VEC_X_START_IDX]    = curr_x;
   vars[VAR_VEC_Y_START_IDX]    = curr_y;
@@ -213,6 +202,7 @@ vector<double> MPC::Solve(Eigen::VectorXd state, Eigen::VectorXd coeffs) {
   vars[VAR_VEC_V_START_IDX]    = curr_v;
   vars[VAR_VEC_CTE_START_IDX]  = curr_cte;
   vars[VAR_VEC_EPSI_START_IDX] = curr_epsi;
+#endif
 
   Dvector vars_lowerbound(n_vars);
   Dvector vars_upperbound(n_vars);
@@ -220,7 +210,7 @@ vector<double> MPC::Solve(Eigen::VectorXd state, Eigen::VectorXd coeffs) {
   // Set lower and upper limits for state variables.
   double max_value = 1.0e19;
   double min_value = -1.0e19;
-  for (var_idx = 0; var_idx < N * state.size(); ++var_idx) {
+  for (var_idx = 0; var_idx < VAR_VEC_DELTA_START_IDX; ++var_idx) {
     vars_lowerbound[var_idx] = min_value;
     vars_upperbound[var_idx] = max_value;
   }
@@ -228,7 +218,7 @@ vector<double> MPC::Solve(Eigen::VectorXd state, Eigen::VectorXd coeffs) {
   // Set lower and upper limits for state variables.
   max_value = DELTA_MAX;
   min_value = DELTA_MIN;
-  for (; var_idx < n_vars - (N - 1); ++var_idx) {
+  for (var_idx = VAR_VEC_DELTA_START_IDX; var_idx < VAR_VEC_A_START_IDX; ++var_idx) {
     vars_lowerbound[var_idx] = min_value;
     vars_upperbound[var_idx] = max_value;
   }
@@ -236,7 +226,7 @@ vector<double> MPC::Solve(Eigen::VectorXd state, Eigen::VectorXd coeffs) {
   // Set lower and upper limits for state variables.
   max_value = A_MAX;
   min_value = A_MIN;
-  for (; var_idx < n_vars; ++var_idx) {
+  for (var_idx = VAR_VEC_A_START_IDX; var_idx < n_vars; ++var_idx) {
     vars_lowerbound[var_idx] = min_value;
     vars_upperbound[var_idx] = max_value;
   }
@@ -308,12 +298,13 @@ vector<double> MPC::Solve(Eigen::VectorXd state, Eigen::VectorXd coeffs) {
   // creates a 2 element double vector.
 
   vector<double> result;
+
   result.push_back(solution.x[VAR_VEC_DELTA_START_IDX]);
   result.push_back(solution.x[VAR_VEC_A_START_IDX]);
 
-  for (var_idx = VAR_VEC_X_START_IDX + 1; var_idx < VAR_VEC_Y_START_IDX - 1; ++var_idx) {
-    result.push_back(solution.x[var_idx]);
-    result.push_back(solution.x[var_idx + N]);
+  for (var_idx = 0; var_idx < N - 1; ++var_idx) {
+    result.push_back(solution.x[VAR_VEC_X_START_IDX + var_idx + 1]);
+    result.push_back(solution.x[VAR_VEC_Y_START_IDX + var_idx + 1]);
   }
 
   return result;
