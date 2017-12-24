@@ -111,6 +111,14 @@ class FG_eval {
     //       Calculate cost
     //////////////////////////////////////
 
+    // This cost function takes into account the track errors, vehicle velocity and actuator values.
+    // The cost function is putting most of it significance on lowering the steering values and after that
+    // lowering the track errors (cte and epsi).
+    // The reason for this prioritization is that low steering values will make the vehicle more stable on track,
+    // most human drivers will not move the wheel much for this reason.
+    // The second most important factor is to stay on track (by reducing the errors) and by keeping the steering values
+    // low by doing so will let this controller handle the delay without changing the car model.
+
     fg[0] = 0;
 
     // Add errors and velocity to cost function.
@@ -178,14 +186,18 @@ class FG_eval {
       AD<double> curr_psi_des = CppAD::atan(coeffs[1] + 2 * coeffs[2] * curr_x + 3 * coeffs[3] * curr_x_2);
 
       // Predict future state using the model.
+      // The model used here is the kinematic model learned in class, where:
       AD<double> pred_x    = curr_x + curr_v * CppAD::cos(curr_psi) * dt;
       AD<double> pred_y    = curr_y + curr_v * CppAD::sin(curr_psi) * dt;
       AD<double> pred_psi  = curr_psi - curr_v * curr_delta / Lf * dt;
       AD<double> pred_v    = curr_v + curr_a * dt;
+      // The errors are calculated by using the polynomial that represents the track.
       AD<double> pred_cte  = curr_f - curr_y + curr_v * CppAD::sin(curr_epsi) * dt;
       AD<double> pred_epsi = curr_psi - curr_psi_des - curr_v * curr_delta / Lf * dt;
 
-      // Set the future state constrains
+      // Set the future state constrains to the difference between predicted state and future state
+      // in order to make the controller make those as equal as possible so the model will match
+      // the actual car state.
       fg[constraint_start_idx + VAR_VEC_X_START_IDX + time_slot_idx]    = next_x - pred_x;
       fg[constraint_start_idx + VAR_VEC_Y_START_IDX + time_slot_idx]    = next_y - pred_y;
       fg[constraint_start_idx + VAR_VEC_PSI_START_IDX + time_slot_idx]  = next_psi - pred_psi;
