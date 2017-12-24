@@ -7,13 +7,21 @@ using CppAD::AD;
 
 using namespace std;
 
+// A copy of deg2rad in order to keep code more readable.
 double mpc_deg2rad(double deg) {
   return deg * M_PI / 180;
 }
 
-// TODO: Set the timestep length and duration
+// The timestep length and duration for time horizon.
+//
+// Time horizion is set to T=1sec in the future.
+// `N` was chosen set to 10 because its a good balance between load and accuracy.
+// `dt` was set to 0.1 becuase lower dt values will make the controller too responsive to changes.
 const size_t N  = 10;
 const double dt = 0.1;
+
+// Number of actuators in model
+const size_t ACTUATORS_NUM  = 2;
 
 // This value assumes the model presented in the classroom is used.
 //
@@ -27,16 +35,33 @@ const double dt = 0.1;
 // This is the length from front to CoG that has a similar radius.
 const double Lf = 2.67;
 
+// Reference velocity & errors
+//
+// Reference velocity was set to 40 because if it was set to 0 the controller may stop the vehicle.
+// in order to reduce the cost.
+//
+// Reference CTE && EPSI was set to 0 in order for cost function to reduce the errors to zero and 
+// make the vehicle stick to the track.
 const double REF_VELOCITY = 40;
 const double REF_CTE      = 0;
 const double REF_EPSI     = 0;
 
-const double COST_FACTOR_ERRORS = 1000;
-const double COST_FACTOR_VELOCITY = 1;
-const double COST_FACTOR_DELTA = 2000;
-const double COST_FACTOR_A     = 400;
+// Cost function factors
+//
+// The factors were set this was in order to signify the importance of each parameter to the controller.
+// Becuase responces are delayed, the most important thing is to keep the steering to minimum.
+// Otherwise, the vehicle will oscillate with increasing rate until it will go out of track.
+//
+// The second most important thing is to stay in track or decrease the CTE and EPSI errors.
+// 
+// After that, the controller will try to keep the steering continuous and the gas padal to low values
+// and at last keep the gas padal values continuous and keep the reference velocity.
+const double COST_FACTOR_ERRORS     = 1000;
+const double COST_FACTOR_VELOCITY   = 1;
+const double COST_FACTOR_DELTA      = 2000;
+const double COST_FACTOR_A          = 400;
 const double COST_FACTOR_DELTA_CONT = 600;
-const double COST_FACTOR_A_CONT = 10;
+const double COST_FACTOR_A_CONT     = 10;
 
 // The start index for each variable in `vars` vector.
 const size_t VAR_VEC_X_START_IDX     = 0;
@@ -56,7 +81,11 @@ const int STATE_VEC_V_IDX     = 3;
 const int STATE_VEC_CTE_IDX   = 4;
 const int STATE_VEC_EPSI_IDX  = 5;
 
-// The controlled parameters constraints
+// The controlled parameters constraints.
+//
+// Delta limits are 25 degrees because its a simulator limitation.
+// A limts are 1 becuase A is ranged from [0,1] when moving forward and
+// to [-1, 0] when moving in reverse.
 const double DELTA_MAX = mpc_deg2rad(25) * Lf;
 const double DELTA_MIN = mpc_deg2rad(-25) * Lf;
 const double A_MAX     = 1;
@@ -78,9 +107,13 @@ class FG_eval {
     // NOTE: You'll probably go back and forth between this function and
     // the Solver function below
 
-    // Calculate the cost function
+    ///////////////////////////////////////
+    //       Calculate cost
+    //////////////////////////////////////
+
     fg[0] = 0;
-    // Add errors to cost function in order to minimize the errors
+
+    // Add errors and velocity to cost function.
     for (size_t time_slot_idx = 0; time_slot_idx < N; ++time_slot_idx ) {
       fg[0] += COST_FACTOR_ERRORS * CppAD::pow(vars[VAR_VEC_CTE_START_IDX + time_slot_idx] - REF_CTE, 2);
       fg[0] += COST_FACTOR_ERRORS * CppAD::pow(vars[VAR_VEC_EPSI_START_IDX + time_slot_idx] - REF_EPSI, 2);
@@ -94,14 +127,17 @@ class FG_eval {
       fg[0] += COST_FACTOR_A * CppAD::pow(vars[VAR_VEC_A_START_IDX + time_slot_idx], 2);
     }
 
-    // Add actuator deltas in order to prevents jump in actuator values.
+    // Add actuator deltas in order to prevents jumps in actuator values.
     for (size_t time_slot_idx = 0; time_slot_idx < N - 2; ++time_slot_idx ) {
       fg[0] += COST_FACTOR_DELTA_CONT * CppAD::pow(vars[VAR_VEC_DELTA_START_IDX + time_slot_idx + 1] - vars[VAR_VEC_DELTA_START_IDX + time_slot_idx], 2);
       fg[0] += COST_FACTOR_A_CONT * CppAD::pow(vars[VAR_VEC_A_START_IDX + time_slot_idx + 1] - vars[VAR_VEC_A_START_IDX + time_slot_idx], 2);
     }
     
 
-    // Calculate constraints
+    ///////////////////////////////////////
+    //       Calculate constraints
+    //////////////////////////////////////
+
     size_t constraint_start_idx = 1; // equals one because idx 0 is used for cost
 
     // constraints at time slot 0
@@ -121,7 +157,7 @@ class FG_eval {
       AD<double> next_cte  = vars[VAR_VEC_CTE_START_IDX + time_slot_idx];
       AD<double> next_epsi = vars[VAR_VEC_EPSI_START_IDX + time_slot_idx];
 
-      // Get curr state
+      // Get curr state (at t)
       AD<double> curr_x    = vars[VAR_VEC_X_START_IDX + time_slot_idx - 1];
       AD<double> curr_y    = vars[VAR_VEC_Y_START_IDX + time_slot_idx - 1];
       AD<double> curr_psi  = vars[VAR_VEC_PSI_START_IDX + time_slot_idx - 1];
@@ -133,9 +169,11 @@ class FG_eval {
       AD<double> curr_delta = vars[VAR_VEC_DELTA_START_IDX + time_slot_idx - 1];
       AD<double> curr_a     = vars[VAR_VEC_A_START_IDX + time_slot_idx - 1];
 
+      // Cache x^2 and x^3 for polynomial use
       AD<double> curr_x_2   = curr_x * curr_x;
       AD<double> curr_x_3   = curr_x_2 * curr_x;
 
+      // Calculate polynomial and its tangent at currecnt location in order to predict errors.
       AD<double> curr_f       = coeffs[0] + coeffs[1] * curr_x + coeffs[2] * curr_x_2 + coeffs[3] * curr_x_3;
       AD<double> curr_psi_des = CppAD::atan(coeffs[1] + 2 * coeffs[2] * curr_x + 3 * coeffs[3] * curr_x_2);
 
@@ -181,7 +219,7 @@ vector<double> MPC::Solve(Eigen::VectorXd state, Eigen::VectorXd coeffs) {
   // element vector and there are 10 timesteps. The number of variables is:
   //
   // 4 * 10 + 2 * 9
-  size_t n_vars   = N * state.size() + (N - 1) * 2;
+  size_t n_vars   = N * state.size() + (N - 1) * ACTUATORS_NUM;
 
   //Set the number of constraints
   size_t n_constraints = N * state.size();
@@ -193,16 +231,6 @@ vector<double> MPC::Solve(Eigen::VectorXd state, Eigen::VectorXd coeffs) {
     vars[var_idx] = 0;
   }
 
-  #if 0
-
-  // Set initial variable values
-  vars[VAR_VEC_X_START_IDX]    = curr_x;
-  vars[VAR_VEC_Y_START_IDX]    = curr_y;
-  vars[VAR_VEC_PSI_START_IDX]  = curr_psi;
-  vars[VAR_VEC_V_START_IDX]    = curr_v;
-  vars[VAR_VEC_CTE_START_IDX]  = curr_cte;
-  vars[VAR_VEC_EPSI_START_IDX] = curr_epsi;
-#endif
 
   Dvector vars_lowerbound(n_vars);
   Dvector vars_upperbound(n_vars);
@@ -215,7 +243,7 @@ vector<double> MPC::Solve(Eigen::VectorXd state, Eigen::VectorXd coeffs) {
     vars_upperbound[var_idx] = max_value;
   }
 
-  // Set lower and upper limits for state variables.
+  // Set lower and upper limits for delta actuator.
   max_value = DELTA_MAX;
   min_value = DELTA_MIN;
   for (var_idx = VAR_VEC_DELTA_START_IDX; var_idx < VAR_VEC_A_START_IDX; ++var_idx) {
@@ -223,7 +251,7 @@ vector<double> MPC::Solve(Eigen::VectorXd state, Eigen::VectorXd coeffs) {
     vars_upperbound[var_idx] = max_value;
   }
 
-  // Set lower and upper limits for state variables.
+  // Set lower and upper limits for a actuator.
   max_value = A_MAX;
   min_value = A_MIN;
   for (var_idx = VAR_VEC_A_START_IDX; var_idx < n_vars; ++var_idx) {
@@ -240,6 +268,7 @@ vector<double> MPC::Solve(Eigen::VectorXd state, Eigen::VectorXd coeffs) {
     constraints_upperbound[var_idx] = 0;
   }
 
+  // Set initial state constraints
   constraints_lowerbound[VAR_VEC_X_START_IDX]    = curr_x;
   constraints_lowerbound[VAR_VEC_Y_START_IDX]    = curr_y;
   constraints_lowerbound[VAR_VEC_PSI_START_IDX]  = curr_psi;
@@ -291,11 +320,9 @@ vector<double> MPC::Solve(Eigen::VectorXd state, Eigen::VectorXd coeffs) {
   auto cost = solution.obj_value;
   std::cout << "Cost " << cost << std::endl;
 
-  // TODO: Return the first actuator values. The variables can be accessed with
-  // `solution.x[i]`.
-  //
-  // {...} is shorthand for creating a vector, so auto x1 = {1.0,2.0}
-  // creates a 2 element double vector.
+  // Return the delta and a actuators and also calculated position of the car at 
+  // each point of the future horizon.
+  // position is is pushed in pairs when odd values are for x and even are for y.
 
   vector<double> result;
 
