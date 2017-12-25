@@ -103,6 +103,27 @@ class FG_eval {
     //       Calculate cost
     //////////////////////////////////////
 
+    // The cost function purpose is to minimize several elements in order to make the car stay in track:
+    // 1. The track errors - The cost function tries to minimize the track and orientation errors in order for
+    //                       the vehicle to stay in the middle of the track.
+    //
+    // 2. The vehicle velocity - The cost function regulates the vehicle velocity to make sure that it will stay somewhat
+    //                           constant. Otherwise, if the velocity will continue to increase, the vehicle will become less
+    //                           staible and will get out of track on curves.
+    //
+    // 3. The vehicle actuator values - The cost function tries to keep the actuator values to minimum.
+    //                                  Very large actuator values will cause very large veriation in velocity and motion
+    //                                  which can in turn make the vehicle motion less stable and cause the overcompensation
+    //                                  of future actuator values until the values reach saturation and the motion cannot be fixed
+    //                                  by the controller.
+    //
+    // 4. Actuator values continuity - Actuator values should be continous and not include large jumps in values.
+    //                                 The reason for this is that large jumps in actuator values can cause violent responces
+    //                                 from vehicle and the purpose of this contorller is also to keep motion as smooth as possible.
+    //
+    // Those different element has different importence for the cost values becuase some of those can cause opposing actuator values
+    // The importence is signified using the factors before each element is added to the cost function.
+    
     fg[0] = 0;
 
     // Add errors and velocity to cost function.
@@ -169,7 +190,7 @@ class FG_eval {
       AD<double> curr_f       = coeffs[0] + coeffs[1] * curr_x + coeffs[2] * curr_x_2 + coeffs[3] * curr_x_3;
       AD<double> curr_psi_des = CppAD::atan(coeffs[1] + 2 * coeffs[2] * curr_x + 3 * coeffs[3] * curr_x_2);
 
-      // Predict future state using the model.
+      // Predict future state using the model
       // The model used here is the kinematic model learned in class, where:
       // x_[t+1] = x[t] + v[t] * cos(psi[t]) * dt
       // y_[t+1] = y[t] + v[t] * sin(psi[t]) * dt
@@ -177,6 +198,7 @@ class FG_eval {
       // v_[t+1] = v[t] + a[t] * dt
       // cte[t+1] = f(x[t]) - y[t] + v[t] * sin(epsi[t]) * dt
       // epsi[t+1] = psi[t] - psides[t] + v[t] * delta[t] / Lf * dt
+      // Lf is constant which is different between vehicles.
       AD<double> pred_x    = curr_x + curr_v * CppAD::cos(curr_psi) * dt;
       AD<double> pred_y    = curr_y + curr_v * CppAD::sin(curr_psi) * dt;
       AD<double> pred_psi  = curr_psi - curr_v * curr_delta / Lf * dt;

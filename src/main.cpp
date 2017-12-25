@@ -145,13 +145,18 @@ int main() {
           double a = j[1]["throttle"];
           double steering = j[1]["steering_angle"];
 
-          // Transform position into car coordinates system.
-          double cos_delta = cos(-psi);
-          double sin_delta = sin(-psi);
+          // ptsx & ptsy were given in map coordiantes.
+          // In order to simplify controller implementation and 
+          // use simulator debug capabilites I transformed the coordinates
+          // into car coordinates system.
+          //
+          // Transformation is done by setting the origin to the car position
+          // and by rotating the coordinates based on the car orientation.
+          double cos_delta = cos(-psi); // cached value for cos.
+          double sin_delta = sin(-psi); // cached value for sin.
           for (size_t i = 0; i < ptsx.size(); ++i) {
             double offset_x = ptsx[i] - px;
             double offset_y = ptsy[i] - py;
-
 
             ptsx[i] = (offset_x * cos_delta) - (offset_y * sin_delta);
             ptsy[i] = (offset_x * sin_delta) + (offset_y * cos_delta);
@@ -160,19 +165,20 @@ int main() {
           // Convert position vectors into Eigen::VectorXd
           double* ptrx = &ptsx[0];
           double* ptry = &ptsy[0];
-
           Eigen::Map<Eigen::VectorXd> ptsx_transform(ptrx, ptsx.size());
           Eigen::Map<Eigen::VectorXd> ptsy_transform(ptry, ptsy.size());
 
           // Calculate track polynomial.
           // The polynomial rank is 3 becuase it fits most tracks shapes.
+          //(A ploynomial with higher rank can cause overfitting and make the track more curvy)
           auto coeffs = polyfit(ptsx_transform, ptsy_transform, 3);
 
           // Calculate the errors
           double cte  = polyeval(coeffs, 0);
           double epsi = -atan(coeffs[1]);
 
-          // Convert the velocity to Meter per seconds
+          // Convert the velocity to meter per seconds because kinematic model
+          // assumes velocity units of meter per second.
           v = Helper::mph2mps(v);
 
           // Create state vector
@@ -183,14 +189,14 @@ int main() {
           Eigen::VectorXd actuators(2);
           actuators << steering, a;
 
-          // Use kinematic model to get the car state after the response latency.
-          // This step was done in order to handle the latency without letting the MPC
-          // know that it exists.
-          // The MPC will preform optimisation on the state that the changes in actuators values will
-          // affect the vehicle state.
+          // Latency handling: Use kinematic model to predict the car state when the actuator values
+          //                   will change.
+          //
+          // This step was done in order to handle the latency without letting the MPC direct involvement.
+          // This causes the MPC to work on the state that will actualy recieve the changes in actuator values.
+          // Which will cause the prediction to be more accurate. 
           state = kinematic_model(state, actuators, coeffs, Helper::millisec2sec(RESPONSE_LATENCY));
 
-          cout << "Sending to MPC" << endl;
           // Send all results to MPC in order to get actuators.
           auto vars = mpc.Solve(state, actuators, coeffs);
 
