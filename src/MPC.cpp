@@ -2,26 +2,22 @@
 #include <cppad/cppad.hpp>
 #include <cppad/ipopt/solve.hpp>
 #include "Eigen-3.3/Eigen/Core"
+#include "helper_functions.h"
 
 using CppAD::AD;
 
 using namespace std;
 
-// A copy of deg2rad in order to keep code more readable.
-double mpc_deg2rad(double deg) {
-  return deg * M_PI / 180;
-}
-
 // The timestep length and duration for time horizon.
 //
-// Time horizion is set to T=1sec in the future.
-// `N` was chosen set to 10 because its a good balance between load and accuracy.
-// `dt` was set to 0.1 becuase lower dt values will make the controller too responsive to changes.
+// Time horizion is set to T=2.5sec to the future.
+// `N` was chosen set to 10 because 10 predictions are sufficent for driving the vehicle and adding more predictions
+// can slow down the controller.
+// `dt` was set to 0.25 in order to make the predictions far to the future but not too far. The controller need to be responsive 
+// but not more responsive then the response latency (100ms).
 const size_t N  = 10;
-const double dt = 0.1;
+const double dt = 0.25;
 
-// Number of actuators in model
-const size_t ACTUATORS_NUM  = 2;
 
 // This value assumes the model presented in the classroom is used.
 //
@@ -37,31 +33,23 @@ const double Lf = 2.67;
 
 // Reference velocity & errors
 //
-// Reference velocity was set to 40 because if it was set to 0 the controller may stop the vehicle.
-// in order to reduce the cost.
+// Reference velocity was set to 60. Higher velocities can make the vehicle lose controll on the turns (in the current cost implementaiton).
 //
 // Reference CTE && EPSI was set to 0 in order for cost function to reduce the errors to zero and 
 // make the vehicle stick to the track.
-const double REF_VELOCITY = 40;
+const double REF_VELOCITY = 60;
 const double REF_CTE      = 0;
 const double REF_EPSI     = 0;
 
 // Cost function factors
 //
 // The factors were set this was in order to signify the importance of each parameter to the controller.
-// Becuase responces are delayed, the most important thing is to keep the steering to minimum.
-// Otherwise, the vehicle will oscillate with increasing rate until it will go out of track.
-//
-// The second most important thing is to stay in track or decrease the CTE and EPSI errors.
-// 
-// After that, the controller will try to keep the steering continuous and the gas padal to low values
-// and at last keep the gas padal values continuous and keep the reference velocity.
-const double COST_FACTOR_ERRORS     = 1000;
-const double COST_FACTOR_VELOCITY   = 1;
-const double COST_FACTOR_DELTA      = 2000;
-const double COST_FACTOR_A          = 400;
-const double COST_FACTOR_DELTA_CONT = 600;
-const double COST_FACTOR_A_CONT     = 10;
+const double COST_FACTOR_ERRORS     = 2000;
+const double COST_FACTOR_VELOCITY   = 3;
+const double COST_FACTOR_DELTA      = 40;
+const double COST_FACTOR_A          = 20;
+const double COST_FACTOR_DELTA_CONT = 1000;
+const double COST_FACTOR_A_CONT     = 100;
 
 // The start index for each variable in `vars` vector.
 const size_t VAR_VEC_X_START_IDX     = 0;
@@ -81,13 +69,17 @@ const int STATE_VEC_V_IDX     = 3;
 const int STATE_VEC_CTE_IDX   = 4;
 const int STATE_VEC_EPSI_IDX  = 5;
 
+// The index of each actuator in `actuators` vector.
+const int ACTUATOR_VEC_DELTA_IDX  = 0;
+const int ACTUATOR_VEC_A_IDX      = 1;
+
 // The controlled parameters constraints.
 //
 // Delta limits are 25 degrees because its a simulator limitation.
 // A limts are 1 becuase A is ranged from [0,1] when moving forward and
 // to [-1, 0] when moving in reverse.
-const double DELTA_MAX = mpc_deg2rad(25) * Lf;
-const double DELTA_MIN = mpc_deg2rad(-25) * Lf;
+const double DELTA_MAX = Helper::deg2rad(25) * Lf;
+const double DELTA_MIN = Helper::deg2rad(-25) * Lf;
 const double A_MAX     = 1;
 const double A_MIN     = -1;
 
@@ -110,14 +102,6 @@ class FG_eval {
     ///////////////////////////////////////
     //       Calculate cost
     //////////////////////////////////////
-
-    // This cost function takes into account the track errors, vehicle velocity and actuator values.
-    // The cost function is putting most of it significance on lowering the steering values and after that
-    // lowering the track errors (cte and epsi).
-    // The reason for this prioritization is that low steering values will make the vehicle more stable on track,
-    // most human drivers will not move the wheel much for this reason.
-    // The second most important factor is to stay on track (by reducing the errors) and by keeping the steering values
-    // low by doing so will let this controller handle the delay without changing the car model.
 
     fg[0] = 0;
 
@@ -187,11 +171,16 @@ class FG_eval {
 
       // Predict future state using the model.
       // The model used here is the kinematic model learned in class, where:
+      // x_[t+1] = x[t] + v[t] * cos(psi[t]) * dt
+      // y_[t+1] = y[t] + v[t] * sin(psi[t]) * dt
+      // psi_[t+1] = psi[t] + v[t] / Lf * delta[t] * dt
+      // v_[t+1] = v[t] + a[t] * dt
+      // cte[t+1] = f(x[t]) - y[t] + v[t] * sin(epsi[t]) * dt
+      // epsi[t+1] = psi[t] - psides[t] + v[t] * delta[t] / Lf * dt
       AD<double> pred_x    = curr_x + curr_v * CppAD::cos(curr_psi) * dt;
       AD<double> pred_y    = curr_y + curr_v * CppAD::sin(curr_psi) * dt;
       AD<double> pred_psi  = curr_psi - curr_v * curr_delta / Lf * dt;
       AD<double> pred_v    = curr_v + curr_a * dt;
-      // The errors are calculated by using the polynomial that represents the track.
       AD<double> pred_cte  = curr_f - curr_y + curr_v * CppAD::sin(curr_epsi) * dt;
       AD<double> pred_epsi = curr_psi - curr_psi_des - curr_v * curr_delta / Lf * dt;
 
@@ -214,7 +203,7 @@ class FG_eval {
 MPC::MPC() {}
 MPC::~MPC() {}
 
-vector<double> MPC::Solve(Eigen::VectorXd state, Eigen::VectorXd coeffs) {
+vector<double> MPC::Solve(Eigen::VectorXd state, Eigen::VectorXd actuators, Eigen::VectorXd coeffs) {
   bool ok = true;
   size_t var_idx;
   typedef CPPAD_TESTVECTOR(double) Dvector;
@@ -226,23 +215,25 @@ vector<double> MPC::Solve(Eigen::VectorXd state, Eigen::VectorXd coeffs) {
   double curr_cte  = state[STATE_VEC_CTE_IDX];
   double curr_epsi = state[STATE_VEC_EPSI_IDX];
 
+  double curr_delta = actuators[ACTUATOR_VEC_DELTA_IDX];
+  double curr_a     = actuators[ACTUATOR_VEC_A_IDX];
+
   // Set the number of model variables (includes both states and inputs).
   // For example: If the state is a 4 element vector, the actuators is a 2
   // element vector and there are 10 timesteps. The number of variables is:
   //
   // 4 * 10 + 2 * 9
-  size_t n_vars   = N * state.size() + (N - 1) * ACTUATORS_NUM;
+  size_t n_vars   = N * state.size() + (N - 1) * actuators.size();
 
   //Set the number of constraints
   size_t n_constraints = N * state.size();
 
   // Initial value of the independent variables.
-  // SHOULD BE 0 besides initial state.
+  // should be 0 besides initial state.
   Dvector vars(n_vars);
   for (var_idx = 0; var_idx < n_vars; ++var_idx) {
     vars[var_idx] = 0;
   }
-
 
   Dvector vars_lowerbound(n_vars);
   Dvector vars_upperbound(n_vars);
@@ -271,6 +262,13 @@ vector<double> MPC::Solve(Eigen::VectorXd state, Eigen::VectorXd coeffs) {
     vars_upperbound[var_idx] = max_value;
   }
 
+  // Take into account the current actuators
+  vars_lowerbound[VAR_VEC_DELTA_START_IDX]  = curr_delta;
+  vars_lowerbound[VAR_VEC_A_START_IDX]      = curr_a;
+
+  vars_upperbound[VAR_VEC_DELTA_START_IDX]  = curr_delta;
+  vars_upperbound[VAR_VEC_A_START_IDX]      = curr_a;
+
   // Lower and upper limits for the constraints
   // Should be 0 besides initial state.
   Dvector constraints_lowerbound(n_constraints);
@@ -281,20 +279,19 @@ vector<double> MPC::Solve(Eigen::VectorXd state, Eigen::VectorXd coeffs) {
   }
 
   // Set initial state constraints
-  constraints_lowerbound[VAR_VEC_X_START_IDX]    = curr_x;
-  constraints_lowerbound[VAR_VEC_Y_START_IDX]    = curr_y;
-  constraints_lowerbound[VAR_VEC_PSI_START_IDX]  = curr_psi;
-  constraints_lowerbound[VAR_VEC_V_START_IDX]    = curr_v;
-  constraints_lowerbound[VAR_VEC_CTE_START_IDX]  = curr_cte;
-  constraints_lowerbound[VAR_VEC_EPSI_START_IDX] = curr_epsi;
+  constraints_lowerbound[VAR_VEC_X_START_IDX]      = curr_x;
+  constraints_lowerbound[VAR_VEC_Y_START_IDX]      = curr_y;
+  constraints_lowerbound[VAR_VEC_PSI_START_IDX]    = curr_psi;
+  constraints_lowerbound[VAR_VEC_V_START_IDX]      = curr_v;
+  constraints_lowerbound[VAR_VEC_CTE_START_IDX]    = curr_cte;
+  constraints_lowerbound[VAR_VEC_EPSI_START_IDX]   = curr_epsi;
 
-  constraints_upperbound[VAR_VEC_X_START_IDX]    = curr_x;
-  constraints_upperbound[VAR_VEC_Y_START_IDX]    = curr_y;
-  constraints_upperbound[VAR_VEC_PSI_START_IDX]  = curr_psi;
-  constraints_upperbound[VAR_VEC_V_START_IDX]    = curr_v;
-  constraints_upperbound[VAR_VEC_CTE_START_IDX]  = curr_cte;
-  constraints_upperbound[VAR_VEC_EPSI_START_IDX] = curr_epsi;
-
+  constraints_upperbound[VAR_VEC_X_START_IDX]      = curr_x;
+  constraints_upperbound[VAR_VEC_Y_START_IDX]      = curr_y;
+  constraints_upperbound[VAR_VEC_PSI_START_IDX]    = curr_psi;
+  constraints_upperbound[VAR_VEC_V_START_IDX]      = curr_v;
+  constraints_upperbound[VAR_VEC_CTE_START_IDX]    = curr_cte;
+  constraints_upperbound[VAR_VEC_EPSI_START_IDX]   = curr_epsi;
 
   // object that computes objective and constraints
   FG_eval fg_eval(coeffs);
@@ -332,14 +329,14 @@ vector<double> MPC::Solve(Eigen::VectorXd state, Eigen::VectorXd coeffs) {
   auto cost = solution.obj_value;
   std::cout << "Cost " << cost << std::endl;
 
-  // Return the delta and a actuators and also calculated position of the car at 
+  // Return the next `delta` and `a` actuators and also calculated position of the car at 
   // each point of the future horizon.
   // position is is pushed in pairs when odd values are for x and even are for y.
 
   vector<double> result;
 
-  result.push_back(solution.x[VAR_VEC_DELTA_START_IDX]);
-  result.push_back(solution.x[VAR_VEC_A_START_IDX]);
+  result.push_back(solution.x[VAR_VEC_DELTA_START_IDX + 1]);
+  result.push_back(solution.x[VAR_VEC_A_START_IDX + 1]);
 
   for (var_idx = 0; var_idx < N - 1; ++var_idx) {
     result.push_back(solution.x[VAR_VEC_X_START_IDX + var_idx + 1]);
